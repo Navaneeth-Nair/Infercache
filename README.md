@@ -63,34 +63,34 @@ If 100 concurrent users ask the exact same uncached question at the same second:
 sequenceDiagram
     autonumber
     actor Client
-    participant Proxy as InferCache (Axum)
-    participant Embed as Candle (all-MiniLM-L6-v2)
-    participant VStore as Vector Store (Qdrant / Memory)
-    participant Coalesce as Coalescing Engine (DashMap)
-    participant Upstream as Upstream LLM (OpenAI)
+    participant Proxy as "InferCache (Axum)"
+    participant Embed as "Candle (all-MiniLM-L6-v2)"
+    participant VStore as "Vector Store (Qdrant / Memory)"
+    participant Coalesce as "Coalescing Engine (DashMap)"
+    participant Upstream as "Upstream LLM (OpenAI)"
 
     Client->>Proxy: POST /v1/chat/completions (stream: true)
-    Proxy->>Embed: Embed prompt (messages text)
-    Embed-->>Proxy: [f32; 384] normalized vector (~3ms)
-    Proxy->>VStore: Search (Cosine similarity >= 0.95)
+    Proxy->>Embed: Embed prompt text
+    Embed-->>Proxy: 384-dim normalized vector (~3ms)
+    Proxy->>VStore: Search vector (threshold 0.95)
     
-    alt Cache Hit (Score >= 0.95)
+    alt Cache Hit (Score at least 0.95)
         VStore-->>Proxy: Return cached SSE chunks
-        Proxy-->>Client: Stream raw SSE chunks (Latency < 10ms)
+        Proxy-->>Client: Stream raw SSE chunks (Latency under 10ms)
     else Cache Miss
-        Proxy->>Coalesce: Acquire slot(model + prompt_hash)
+        Proxy->>Coalesce: Acquire slot (model and prompt hash)
         alt Another request already in-flight
-            Coalesce-->>Proxy: Subscriber (broadcast::Receiver)
+            Coalesce-->>Proxy: Subscriber (listen to broadcast)
             Proxy-->>Client: Stream live chunks from Leader
         else Primary request
-            Coalesce-->>Proxy: Leader (broadcast::Sender)
+            Coalesce-->>Proxy: Leader (fetch upstream)
             Proxy->>Upstream: Forward request to LLM
             loop Stream Chunks
                 Upstream-->>Proxy: SSE Chunk
                 Proxy->>Coalesce: Broadcast chunk to subscribers
                 Proxy-->>Client: Stream SSE chunk to client
             end
-            Proxy->>VStore: Upsert vector & SSE chunks
+            Proxy->>VStore: Upsert vector and SSE chunks
             Proxy->>Coalesce: Release leader slot
         end
     end
