@@ -2,7 +2,6 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg?logo=rust)](https://www.rust-lang.org/)
 [![RAM Footprint](https://img.shields.io/badge/Peak%20RAM-%3C%20265%20MB-brightgreen.svg)](https://github.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Cache Hit Latency](https://img.shields.io/badge/Cache%20Hit%20Latency-%3C%2010ms-success.svg)](https://github.com)
 
 > **Ultra-Low-RAM Semantic Caching Reverse Proxy for LLM APIs**  
@@ -240,9 +239,4 @@ test test_proxy_cache_miss_then_hit_e2e ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; finished in 0.22s
 ```
-
----
-
-## License
-MIT License. Crafted with precision for high-efficiency LLM infrastructure.
 
