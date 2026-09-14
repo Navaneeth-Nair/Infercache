@@ -64,6 +64,7 @@ lazy_static! {
     ).expect("Failed to create ENCRYPTED_PAYLOADS_SERVED metric");
 
     static ref SYSTEM_MONITOR: Mutex<System> = Mutex::new(System::new());
+    static ref LAST_MEMORY_UPDATE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 }
 
 // Register all metrics in the Prometheus registry.
@@ -81,14 +82,21 @@ pub fn init_metrics() {
     update_memory_usage();
 }
 
-// Refresh current process memory usage via sysinfo.
+// Refresh current process memory usage via sysinfo. Throttled to at most once every 2s.
 pub fn update_memory_usage() {
-    if let Ok(mut sys) = SYSTEM_MONITOR.lock() {
-        let pid = Pid::from_u32(std::process::id());
-        sys.refresh_process(pid);
-        if let Some(proc) = sys.process(pid) {
-            let mem_bytes = proc.memory();
-            MEMORY_USAGE_BYTES.set(mem_bytes as f64);
+    if let Ok(mut last_update) = LAST_MEMORY_UPDATE.lock() {
+        if last_update.is_some_and(|last| last.elapsed().as_secs() < 2) {
+            return;
+        }
+
+        if let Ok(mut sys) = SYSTEM_MONITOR.lock() {
+            let pid = Pid::from_u32(std::process::id());
+            sys.refresh_process(pid);
+            if let Some(proc) = sys.process(pid) {
+                let mem_bytes = proc.memory();
+                MEMORY_USAGE_BYTES.set(mem_bytes as f64);
+                *last_update = Some(std::time::Instant::now());
+            }
         }
     }
 }
@@ -99,14 +107,12 @@ pub fn record_cache_hit(duration_secs: f64) {
     REQUEST_DURATION.observe(duration_secs);
     ESTIMATED_USD_SAVED.add(0.00035);
     ENCRYPTED_PAYLOADS_SERVED.inc();
-    update_memory_usage();
 }
 
 // Record cache miss and track request duration.
 pub fn record_cache_miss(duration_secs: f64) {
     CACHE_OPERATIONS.with_label_values(&["miss"]).inc();
     REQUEST_DURATION.observe(duration_secs);
-    update_memory_usage();
 }
 
 // Record coalesced request deduplicated via broadcast channel.
@@ -115,7 +121,6 @@ pub fn record_coalesced(model: &str, duration_secs: f64) {
     COALESCED_REQUESTS_TOTAL.with_label_values(&[model]).inc();
     REQUEST_DURATION.observe(duration_secs);
     ESTIMATED_USD_SAVED.add(0.00035);
-    update_memory_usage();
 }
 
 // Return metrics in Prometheus text exposition format.

@@ -1,3 +1,4 @@
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -19,6 +20,33 @@ pub enum CoalescingSlot {
     },
 }
 
+// RAII guard ensuring in-flight key release even upon task cancellation or panic.
+pub struct CoalescingGuard {
+    engine: Arc<CoalescingEngine>,
+    key: Option<String>,
+}
+
+impl CoalescingGuard {
+    pub fn new(engine: Arc<CoalescingEngine>, key: String) -> Self {
+        Self {
+            engine,
+            key: Some(key),
+        }
+    }
+
+    pub fn disarm(&mut self) {
+        self.key = None;
+    }
+}
+
+impl Drop for CoalescingGuard {
+    fn drop(&mut self) {
+        if let Some(ref key) = self.key {
+            self.engine.release(key);
+        }
+    }
+}
+
 pub struct CoalescingEngine {
     in_flight: Arc<InFlightRequests>,
 }
@@ -29,21 +57,24 @@ impl CoalescingEngine {
     }
 
     // Acquire leader slot for new request, or subscribe if already in flight.
+    // Atomically checks and inserts via DashMap Entry API to prevent TOCTOU race conditions.
     pub fn acquire(&self, key: String) -> CoalescingSlot {
-        if let Some(existing_tx) = self.in_flight.get(&key) {
-            let rx = existing_tx.subscribe();
-            tracing::info!(key = %key, "Request coalesced with active in-flight stream");
-            return CoalescingSlot::Subscriber {
-                receiver: rx,
-                key,
-            };
+        match self.in_flight.entry(key.clone()) {
+            Entry::Occupied(entry) => {
+                let rx = entry.get().subscribe();
+                tracing::info!(key = %key, "Request coalesced with active in-flight stream");
+                CoalescingSlot::Subscriber {
+                    receiver: rx,
+                    key,
+                }
+            }
+            Entry::Vacant(entry) => {
+                let (tx, _) = broadcast::channel(128);
+                entry.insert(tx.clone());
+                tracing::debug!(key = %key, "Created new leader stream for coalescing");
+                CoalescingSlot::Leader { sender: tx, key }
+            }
         }
-
-        let (tx, _) = broadcast::channel(128);
-        self.in_flight.insert(key.clone(), tx.clone());
-        tracing::debug!(key = %key, "Created new leader stream for coalescing");
-
-        CoalescingSlot::Leader { sender: tx, key }
     }
 
     // Release leader key after upstream stream finishes.

@@ -1,9 +1,5 @@
 # InferCache
 
-[![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg?logo=rust)](https://www.rust-lang.org/)
-[![RAM Footprint](https://img.shields.io/badge/Peak%20RAM-%3C%20265%20MB-brightgreen.svg)](https://github.com)
-[![Cache Hit Latency](https://img.shields.io/badge/Cache%20Hit%20Latency-%3C%2010ms-success.svg)](https://github.com)
-
 > **Ultra-Low-RAM Semantic Caching Reverse Proxy for LLM APIs**  
 > Run enterprise-grade semantic caching for OpenAI-compatible streaming APIs on a **$4/mo VPS (1 vCPU, 1GB RAM)**.
 
@@ -15,11 +11,11 @@ InferCache is engineered from the ground up for extreme memory efficiency and ha
 
 | Subsystem | Technology | Memory Footprint |
 | :--- | :--- | :--- |
-| **Reverse Proxy & Async Engine** | Axum 0.7 + Tokio + Tower | ~20 MB |
-| **Local Embedding Model** | `all-MiniLM-L6-v2` via HuggingFace Candle (FP16/quantized) | ~45 MB |
+| **Local Embedding Model** | `all-MiniLM-L6-v2` via HuggingFace Candle (22.7M params, FP32 CPU) | ~87 MB |
+| **Reverse Proxy & Async Engine** | Axum 0.7 + Tokio + Tower + Tokenizer | ~8 MB |
 | **Vector Engine** | Embedded In-Memory / Qdrant (up to 100,000 vectors) | ~50 - 150 MB |
-| **Active Request State** | Lock-free DashMap & Tokio broadcast buffers (500 concurrent streams) | ~50 MB |
-| **Total Peak RAM** | | **~265 MB** |
+| **Active Request State** | Lock-free DashMap & Tokio broadcast buffers (500 concurrent streams) | ~20 MB |
+| **Total Peak RAM** | | **< 265 MB** |
 
 ### Target Hardware
 * **Minimum Production Server:** 1 vCPU, 1 GB RAM (e.g., DigitalOcean $4/mo droplet, Hetzner CX11 at EUR 3.29/mo).
@@ -214,7 +210,7 @@ InferCache exposes production-grade Prometheus metrics on `GET /metrics` for dir
 
 | Metric | Traditional Python / Redis Cache | InferCache (Rust + Candle) |
 | :--- | :--- | :--- |
-| **Idle RAM Footprint** | ~1,200 MB - 2,500 MB | **~65 MB** |
+| **Idle RAM Footprint** | ~1,200 MB - 2,500 MB | **~95 MB** |
 | **Peak RAM (100k vectors)** | ~4,000 MB - 8,000 MB | **< 265 MB** |
 | **Embedding Latency** | 150ms - 350ms (External API) | **~3ms (Local Candle CPU)** |
 | **Cache Hit Latency** | 80ms - 180ms | **< 10ms** |

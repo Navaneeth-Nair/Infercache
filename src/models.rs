@@ -40,6 +40,11 @@ impl ChatCompletionRequest {
     // Computes SHA-256 hash of normalized prompt.
     pub fn prompt_hash(&self) -> String {
         let prompt = self.extract_prompt();
+        Self::prompt_hash_from_prompt(&prompt)
+    }
+
+    // Computes SHA-256 hash directly from pre-extracted prompt to prevent re-allocation.
+    pub fn prompt_hash_from_prompt(prompt: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(prompt.as_bytes());
         hex::encode(hasher.finalize())

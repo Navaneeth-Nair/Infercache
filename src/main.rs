@@ -23,8 +23,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .init();
 
-    print_banner();
-
     let config = Config::from_env();
     tracing::info!(
         host = %config.host,
@@ -154,21 +152,4 @@ async fn stats_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             "cached_vectors_in_store": state.vector_store.len().await,
         })),
     )
-}
-
-fn print_banner() {
-    println!(
-        r#"
-===================================================================
-  ___        __              ____           _          
- |_ _|_ __  / _| ___ _ __   / ___|__ _  ___| |__   ___ 
-  | || '_ \| |_ / _ \ '__| | |   / _` |/ __| '_ \ / _ \
-  | || | | |  _|  __/ |    | |__| (_| | (__| | | |  __/
- |___|_| |_|_|  \___|_|     \____\__,_|\___|_| |_|\___|
- 
-  Ultra-Low-RAM Semantic Caching LLM Reverse Proxy
-  Target RAM Budget: < 300MB | Axum + Tokio + Candle + Qdrant
-===================================================================
-"#
-    );
 }

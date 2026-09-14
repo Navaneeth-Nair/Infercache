@@ -1,12 +1,11 @@
 use crate::models::CachePayload;
 use async_trait::async_trait;
-use dashmap::DashMap;
 use parking_lot::RwLock;
 use qdrant_client::qdrant::{
     CreateCollectionBuilder, Distance, PointStruct, SearchPointsBuilder, Value, VectorParamsBuilder,
 };
 use qdrant_client::Qdrant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -16,31 +15,46 @@ pub trait VectorStore: Send + Sync {
     async fn search(&self, vector: &[f32], model: &str, threshold: f32) -> Result<Option<CachePayload>, DynError>;
     async fn insert(&self, payload: CachePayload, vector: &[f32]) -> Result<(), DynError>;
     async fn len(&self) -> usize;
+    async fn is_empty(&self) -> bool {
+        self.len().await == 0
+    }
+}
+
+struct InMemoryInner {
+    exact_hashes: HashSet<String>,
+    vectors: Vec<(Vec<f32>, Arc<CachePayload>)>,
 }
 
 // In-memory vector store (<50MB RAM, zero external dependencies).
 pub struct InMemoryVectorStore {
-    exact_hashes: DashMap<String, CachePayload>,
-    vectors: RwLock<Vec<(Vec<f32>, CachePayload)>>,
+    inner: RwLock<InMemoryInner>,
 }
 
 impl InMemoryVectorStore {
     pub fn new() -> Self {
         Self {
-            exact_hashes: DashMap::new(),
-            vectors: RwLock::new(Vec::new()),
+            inner: RwLock::new(InMemoryInner {
+                exact_hashes: HashSet::new(),
+                vectors: Vec::new(),
+            }),
         }
+    }
+}
+
+impl Default for InMemoryVectorStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
     async fn search(&self, vector: &[f32], model: &str, threshold: f32) -> Result<Option<CachePayload>, DynError> {
-        // Search vectors using cosine similarity; exact hashes used for insert dedup.
-        let vectors_read = self.vectors.read();
-        let mut best_match: Option<(f32, CachePayload)> = None;
+        // Search vectors using cosine similarity.
+        let inner = self.inner.read();
+        let mut best_match: Option<(f32, Arc<CachePayload>)> = None;
 
-        for (stored_vec, payload) in vectors_read.iter() {
+        for (stored_vec, payload) in inner.vectors.iter() {
             if payload.model != model {
                 continue;
             }
@@ -67,25 +81,26 @@ impl VectorStore for InMemoryVectorStore {
 
         if let Some((score, payload)) = best_match {
             tracing::info!(score = %score, prompt_hash = %payload.prompt_hash, "In-Memory Semantic Cache Hit");
-            return Ok(Some(payload));
+            return Ok(Some((*payload).clone()));
         }
 
         Ok(None)
     }
 
     async fn insert(&self, payload: CachePayload, vector: &[f32]) -> Result<(), DynError> {
-        // Deduplicate by prompt hash to avoid duplicate entries.
-        if self.exact_hashes.contains_key(&payload.prompt_hash) {
+        const MAX_CACHE_ENTRIES: usize = 10_000;
+        let mut inner = self.inner.write();
+
+        // Atomic deduplication by prompt hash: single lock prevents any TOCTOU race.
+        if inner.exact_hashes.contains(&payload.prompt_hash) {
             tracing::debug!(prompt_hash = %payload.prompt_hash, "Exact-hash duplicate; skipping insert");
             return Ok(());
         }
 
         // Enforce 10,000 entry cap by FIFO eviction of oldest entry.
-        const MAX_CACHE_ENTRIES: usize = 10_000;
-        let mut vectors_write = self.vectors.write();
-        if vectors_write.len() >= MAX_CACHE_ENTRIES {
-            let evicted = vectors_write.remove(0);
-            self.exact_hashes.remove(&evicted.1.prompt_hash);
+        if inner.vectors.len() >= MAX_CACHE_ENTRIES {
+            let evicted = inner.vectors.remove(0);
+            inner.exact_hashes.remove(&evicted.1.prompt_hash);
             tracing::warn!(
                 evicted_hash = %evicted.1.prompt_hash,
                 "InMemoryVectorStore at capacity ({}); evicted oldest entry (FIFO)",
@@ -93,13 +108,14 @@ impl VectorStore for InMemoryVectorStore {
             );
         }
 
-        self.exact_hashes.insert(payload.prompt_hash.clone(), payload.clone());
-        vectors_write.push((vector.to_vec(), payload));
+        let prompt_hash = payload.prompt_hash.clone();
+        inner.exact_hashes.insert(prompt_hash);
+        inner.vectors.push((vector.to_vec(), Arc::new(payload)));
         Ok(())
     }
 
     async fn len(&self) -> usize {
-        self.vectors.read().len()
+        self.inner.read().vectors.len()
     }
 }
 

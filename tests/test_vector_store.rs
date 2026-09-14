@@ -43,3 +43,29 @@ async fn test_in_memory_vector_store_cosine_search() {
     let diff_model = store.search(&vec_384, "claude-3-5-sonnet", 0.95).await.unwrap();
     assert!(diff_model.is_none());
 }
+
+#[tokio::test]
+async fn test_in_memory_vector_store_deduplication() {
+    let store = InMemoryVectorStore::new();
+    let vec_384 = make_normalized_vector(384, 0);
+
+    let payload1 = CachePayload::new(
+        "dup_hash".to_string(),
+        "Hello duplicate".to_string(),
+        "gpt-4o-mini".to_string(),
+        vec!["chunk1".to_string()],
+    );
+    let payload2 = CachePayload::new(
+        "dup_hash".to_string(),
+        "Hello duplicate".to_string(),
+        "gpt-4o-mini".to_string(),
+        vec!["chunk2".to_string()],
+    );
+
+    store.insert(payload1, &vec_384).await.unwrap();
+    assert_eq!(store.len().await, 1);
+
+    // Second insert with same prompt_hash must be deduplicated
+    store.insert(payload2, &vec_384).await.unwrap();
+    assert_eq!(store.len().await, 1);
+}

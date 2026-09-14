@@ -24,6 +24,12 @@ impl Metrics {
     }
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AppState {
     pub config: Config,
     pub embedding_model: Arc<CandleEmbeddingModel>,

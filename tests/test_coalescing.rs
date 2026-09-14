@@ -52,3 +52,36 @@ async fn test_request_coalescing_thundering_herd() {
         _ => panic!("Expected new Leader slot after release"),
     }
 }
+
+#[tokio::test]
+async fn test_coalescing_guard_raii_drop() {
+    use infercache::coalescing::CoalescingGuard;
+
+    let in_flight = Arc::new(DashMap::new());
+    let engine = Arc::new(CoalescingEngine::new(in_flight));
+    let key = "gpt-4o-mini:guard_test_key".to_string();
+
+    {
+        let slot = engine.acquire(key.clone());
+        let leader_key = match slot {
+            CoalescingSlot::Leader { key, .. } => key,
+            _ => panic!("Expected leader"),
+        };
+        let _guard = CoalescingGuard::new(engine.clone(), leader_key);
+
+        // While guard is alive, subsequent acquire is subscriber
+        let slot2 = engine.acquire(key.clone());
+        match slot2 {
+            CoalescingSlot::Subscriber { .. } => {}
+            _ => panic!("Expected subscriber while guard is in scope"),
+        }
+        // _guard is dropped here at end of scope
+    }
+
+    // After guard drops, key should be automatically released
+    let slot3 = engine.acquire(key.clone());
+    match slot3 {
+        CoalescingSlot::Leader { .. } => {}
+        _ => panic!("Expected new leader after guard dropped"),
+    }
+}

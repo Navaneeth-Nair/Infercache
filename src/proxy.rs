@@ -1,4 +1,4 @@
-use crate::coalescing::CoalescingSlot;
+use crate::coalescing::{CoalescingGuard, CoalescingSlot};
 use crate::models::{CachePayload, ChatCompletionRequest};
 use crate::state::AppState;
 use axum::body::Body;
@@ -22,9 +22,9 @@ pub async fn chat_completions_handler(
 
     let is_streaming = request.stream.unwrap_or(false);
     let prompt = request.extract_prompt();
-    let prompt_hash = request.prompt_hash();
-    let coalescing_key = request.coalescing_key();
+    let prompt_hash = ChatCompletionRequest::prompt_hash_from_prompt(&prompt);
     let model = request.model.clone();
+    let coalescing_key = format!("{}:{}", model, prompt_hash);
 
     tracing::debug!(
         model = %model,
@@ -130,6 +130,7 @@ fn serve_cached_sse_stream(chunks: Vec<String>) -> Response {
 }
 
 // Primary request handler: streams upstream, broadcasts, and saves to cache.
+#[allow(clippy::too_many_arguments)]
 async fn handle_leader_upstream(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -150,11 +151,12 @@ async fn handle_leader_upstream(
         req_builder = req_builder.header(header::AUTHORIZATION, format!("Bearer {api_key}"));
     }
 
+    let coalescing_guard = CoalescingGuard::new(state.coalescing_engine.clone(), coalesce_key);
+
     let upstream_res = match req_builder.send().await {
         Ok(res) => res,
         Err(e) => {
             tracing::error!(error = %e, "Failed to connect to upstream LLM");
-            state.coalescing_engine.release(&coalesce_key);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -171,7 +173,6 @@ async fn handle_leader_upstream(
     if !upstream_res.status().is_success() {
         let status = upstream_res.status();
         let body = upstream_res.text().await.unwrap_or_default();
-        state.coalescing_engine.release(&coalesce_key);
         return (status, body).into_response();
     }
 
@@ -182,9 +183,12 @@ async fn handle_leader_upstream(
     let model = request.model.clone();
 
     tokio::spawn(async move {
+        // Coalescing guard is moved here and automatically releases leader key on scope exit or panic.
+        let _guard = coalescing_guard;
         let mut byte_stream = upstream_res.bytes_stream();
         let mut accumulated_chunks: Vec<String> = Vec::new();
         let mut stream_complete = false;
+        let mut primary_active = true;
 
         while let Some(chunk_res) = byte_stream.next().await {
             match chunk_res {
@@ -200,24 +204,32 @@ async fn handle_leader_upstream(
                     // Broadcast chunk to secondary subscribers.
                     let _ = sender.send(text.clone());
 
-                    // Send chunk to primary client.
-                    if tx.send(Ok(text)).await.is_err() {
-                        tracing::warn!("Primary client disconnected during stream");
+                    // Send chunk to primary client if still connected.
+                    if primary_active {
+                        if tx.send(Ok(text)).await.is_err() {
+                            tracing::warn!("Primary client disconnected during stream");
+                            primary_active = false;
+                            // If there are no secondary subscribers, abort upstream fetch.
+                            if sender.receiver_count() == 0 {
+                                break;
+                            }
+                        }
+                    } else if sender.receiver_count() == 0 {
+                        // All secondary subscribers have also disconnected.
                         break;
                     }
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Error reading upstream byte chunk");
-                    let _ = tx
-                        .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                        .await;
+                    if primary_active {
+                        let _ = tx
+                            .send(Err(std::io::Error::other(e)))
+                            .await;
+                    }
                     break;
                 }
             }
         }
-
-        // Release coalescing leader key.
-        state_clone.coalescing_engine.release(&coalesce_key);
 
         // Cache response only if stream completed successfully.
         if stream_complete && !accumulated_chunks.is_empty() {

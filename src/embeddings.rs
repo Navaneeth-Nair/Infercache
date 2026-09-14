@@ -13,7 +13,7 @@ impl CandleEmbeddingModel {
     // Loads all-MiniLM-L6-v2 model and tokenizer from HuggingFace Hub or local cache.
     pub fn load(model_id: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let device = Device::Cpu;
-        tracing::info!(model_id = %model_id, "Loading embedding model on CPU (FP16/Quantized footprint)");
+        tracing::info!(model_id = %model_id, "Loading embedding model on CPU (FP32 precision)");
 
         let api = hf_hub::api::sync::Api::new()?;
         let repo = api.model(model_id.to_string());
@@ -25,20 +25,26 @@ impl CandleEmbeddingModel {
         let config_str = std::fs::read_to_string(&config_path)?;
         let config: BertConfig = serde_json::from_str(&config_str)?;
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
+        tokenizer.with_padding(None);
+        tokenizer.with_truncation(Some(tokenizers::TruncationParams {
+            max_length: 512,
+            ..Default::default()
+        })).map_err(|e| format!("Failed to configure truncation: {e}"))?;
 
-        // Load weights into owned heap memory to prevent concurrent file mutation.
-        let weights_bytes = std::fs::read(&weights_path)?;
-        let vb = candle_nn::VarBuilder::from_buffered_safetensors(
-            weights_bytes,
-            candle_core::DType::F32,
-            &device,
-        )?;
+        // Memory-map safetensors to eliminate 90MB transient heap allocation.
+        let vb = unsafe {
+            candle_nn::VarBuilder::from_mmaped_safetensors(
+                &[&weights_path],
+                candle_core::DType::F32,
+                &device,
+            )?
+        };
 
         let model = BertModel::load(vb, &config)?;
 
-        tracing::info!("Embedding model 'all-MiniLM-L6-v2' initialized successfully (~45MB RAM footprint)");
+        tracing::info!("Embedding model 'all-MiniLM-L6-v2' initialized successfully (~87MB FP32 weights, ~95MB total idle RAM)");
 
         Ok(Self {
             model: Some(Arc::new(Mutex::new(model))),
@@ -86,11 +92,7 @@ impl CandleEmbeddingModel {
         text: &str,
         device: &Device,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut tokenizer = tokenizer_arc.as_ref().clone();
-        tokenizer.with_padding(None);
-        tokenizer.with_truncation(None).ok();
-
-        let encoding = tokenizer
+        let encoding = tokenizer_arc
             .encode(text, true)
             .map_err(|e| format!("Tokenization failed: {e}"))?;
 
